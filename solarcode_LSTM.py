@@ -85,27 +85,36 @@ plt.show()
 df = gen_1.copy()
 df.head()
 
+df2= sens_1.copy()
+df2['DATE_TIME'] = pd.to_datetime(sens_1['DATE_TIME'], format='%Y-%m-%d %H:%M:%S')
+
 # Step 1: Convert 'DATE_TIME' to a datetime object
 df['DATE_TIME'] = pd.to_datetime(df['DATE_TIME'], format='%d-%m-%Y %H:%M')
 
 # Step 2: Set 'DATE_TIME' as the index
 df.set_index('DATE_TIME', inplace=True)
+df2.set_index('DATE_TIME', inplace=True)
 
 # output_file = 'final_dataset1.csv'
 # df.to_csv(output_file, index=False)
 
+sens_numeric = df2[['AMBIENT_TEMPERATURE', 'MODULE_TEMPERATURE', 'IRRADIATION']]
 # Step 3: Resample the data into 15-minute intervals and sum the values over each interval
+sens_resampled = sens_numeric.resample('15T').mean()
 df_resampled = df.resample('15T').sum()
 
+df_final = pd.merge(df_resampled, sens_resampled[['AMBIENT_TEMPERATURE', 'MODULE_TEMPERATURE', 'IRRADIATION']], 
+                    left_index=True, right_index=True, how='inner')
 
-df_resampled['DAILY_YIELD_MW'] = df_resampled['DAILY_YIELD']/1000
+
+df_final['DAILY_YIELD_MW'] = df_final['DAILY_YIELD']/1000
 print("Our acutal dataset is:")
-print(df_resampled.head())
+print(df_final.head())
 
-# output_file = 'final_dataset2.csv'
-# df_resampled.to_csv(output_file, index=False)
+output_file = 'final_dataset3_check_adding_sensor_data_lstm.csv'
+df_final.to_csv(output_file, index=False)
 
-daily_yield = df_resampled['DAILY_YIELD_MW']
+daily_yield = df_final['DAILY_YIELD_MW']
 print(daily_yield.head(20))
 print(daily_yield.shape)
 
@@ -493,46 +502,166 @@ train_metrics_model2 = evaluate_model_performance(y_test, test_predictions_2)
 
 
 
+from datetime import timedelta
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+print("checking the model2")
+print(model2.summary())
 
-# Import libraries (already included in your code)
-# ...
+def predict_future_seq2seq(model, data, n_future_steps, window_size=5):
+  all_predictions = []
 
-# Load the best performing model (confirmed to be model2)
-model = load_model('model2_best.keras')
+  # Iterate through the data with a sliding window
+  for i in range(len(data) - window_size + 1):
+    # Get the current window of data
+    input_data = data[i:i + window_size]
 
-# Get the last timestep from the test data (assuming your test data is available)
-# Get the last timestep from the test data (assuming your test data is available)
-last_timestep = X_test[-1]
+    # Reshape the data for the LSTM model (batch size = 1, window size, features = 1)
+    input_data_reshaped = input_data.reshape((1, window_size, 1))
 
-# Print the shape of the last timestep for verification
-print(f"Shape of the last timestep: {last_timestep.shape}")
+    # Predict the next step using the model
+    next_prediction = model.predict(input_data_reshaped)
 
-# Define the number of days to predict (3 days in this case)
-num_days_to_predict = 3
+    # Flatten the prediction and append it to the all_predictions list
+    next_value = next_prediction.flatten()[0]
+    all_predictions.append(next_value)
 
-# Function to predict for the next day
-def predict_next_day(last_timestep):
-  predictions = []
-  for _ in range(num_days_to_predict * 48):  # 48 timesteps per day (assuming 15-minute intervals)
-    # Reshape the last_timestep to include a batch dimension (of size 1)
-    last_timestep = last_timestep.reshape(1, *last_timestep.shape)  # Reshape to add batch dimension
-    prediction = model.predict(last_timestep)[0][0]
-    predictions.append(prediction)
-    last_timestep = np.append(last_timestep[1:], prediction)  # Shift the timestep and append the prediction
-  return predictions
+  # Select the last n_future_steps predictions for future forecast
+  future_predictions = all_predictions[-n_future_steps:]
 
-# Try-except block to handle potential errors during prediction
-try:
-  # Predict yield for the next 3 days
-  next_3_days_predictions = predict_next_day(last_timestep)
+  return future_predictions
 
-  # Print the predicted yield for each timestep
-  print(f"Predicted yield for the next {num_days_to_predict} days:")
-  for i, prediction in enumerate(next_3_days_predictions):
-    print(f"Timestep {i+1}: {prediction:.4f}")
-except Exception as e:
-  print(f"Error during prediction: {e}")
+# Get the dataset as numpy array
+data = daily_yield.to_numpy()
 
-# You can further process the predictions here, 
-# for example, convert them back to the original units (if needed)
-# or plot them to visualize the predicted yield trend.
+# Reduce the number of future 15-minute intervals for faster prediction
+n_future_intervals = 3 * 96  # Predict only the next 10 intervals (15 minutes each)
+
+# Forecast future values using the trained model in a single step for sequence-to-sequence
+future_predictions = predict_future_seq2seq(model2, data, n_future_steps=n_future_intervals)
+
+# Create future date range based on the last date in the dataset, spaced by 15 minutes
+last_date = df_final.index[-1]
+future_dates = [last_date + timedelta(minutes=15 * i) for i in range(n_future_intervals)]
+
+# # Ensure future_predictions and future_dates have the same length
+# # Truncate or pad the lists to match the shorter one if needed
+# min_length = min(len(future_predictions), len(future_dates))
+# future_predictions = future_predictions[:min_length]
+# future_dates = future_dates[:min_length]
+
+# Create a DataFrame for future predictions
+future_df = pd.DataFrame({
+    'DATE_TIME': future_dates,
+    'Predicted_Power': future_predictions
+})
+
+# Save future predictions to CSV
+future_df.to_csv('future_predictions_LSTM_optimized_3-days.csv', index=False)
+
+# Plot the future predictions
+plt.figure(figsize=(10, 6))
+plt.plot(df_resampled.index[-100:], daily_yield[-100:], label='Actual Power', color='blue')
+plt.plot(future_df['DATE_TIME'], future_df['Predicted_Power'], label='Predicted Future Power (15-min intervals)', color='red', linestyle='--', marker='o')
+
+# Add labels, title, and grid
+plt.title('Solar Power Forecast for Future Intervals', fontsize=16)
+plt.xlabel('Date and Time', fontsize=12)
+plt.ylabel('Power (MW)', fontsize=12)
+plt.grid(True)
+
+# Add a legend
+plt.legend()
+
+# Show the plot
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+
+
+
+
+# from datetime import timedelta
+# import numpy as np
+# import pandas as pd
+# import matplotlib.pyplot as plt
+# print("checking the model2")
+# print(model2.summary())
+
+# def predict_future_seq2seq(model, data, n_future_steps, window_size=5):
+#     # Prepare input data (only the last window of data is used)
+#     input_data = data[-window_size:]
+    
+#     # Initialize a list to store predictions
+#     predictions = []
+    
+#     # Predict multiple future steps iteratively
+#     for _ in range(n_future_steps):
+#         # Reshape input data for LSTM (batch size = 1, window size, features = 1)
+#         input_data_reshaped = input_data.reshape((1, window_size, 1))
+        
+#         # Predict the next step using the model
+#         next_prediction = model.predict(input_data_reshaped)
+        
+#         # Flatten the prediction and add it to the predictions list
+#         next_value = next_prediction.flatten()[0]
+#         predictions.append(next_value)
+        
+#         # Update the input window by appending the prediction and removing the first value
+#         input_data = np.append(input_data[1:], next_value)
+    
+#     # Return the list of predictions
+#     return predictions
+
+# # Get the dataset as numpy array
+# data = daily_yield.to_numpy()
+
+# # Reduce the number of future 15-minute intervals for faster prediction
+# n_future_intervals = 20 * 96  # Predict only the next 10 intervals (15 minutes each)
+
+# # Forecast future values using the trained model in a single step for sequence-to-sequence
+# future_predictions = predict_future_seq2seq(model2, data, n_future_steps=n_future_intervals)
+
+# # Create future date range based on the last date in the dataset, spaced by 15 minutes
+# last_date = df_final.index[-1]
+# future_dates = [last_date + timedelta(minutes=15 * i) for i in range(n_future_intervals)]
+
+# # # Ensure future_predictions and future_dates have the same length
+# # # Truncate or pad the lists to match the shorter one if needed
+# # min_length = min(len(future_predictions), len(future_dates))
+# # future_predictions = future_predictions[:min_length]
+# # future_dates = future_dates[:min_length]
+
+# # Create a DataFrame for future predictions
+# future_df = pd.DataFrame({
+#     'DATE_TIME': future_dates,
+#     'Predicted_Power': future_predictions
+# })
+
+# # Save future predictions to CSV
+# future_df.to_csv('future_predictions_LSTM_optimized2.csv', index=False)
+
+# # Plot the future predictions
+# plt.figure(figsize=(10, 6))
+# plt.plot(df_resampled.index[-100:], daily_yield[-100:], label='Actual Power', color='blue')
+# plt.plot(future_df['DATE_TIME'], future_df['Predicted_Power'], label='Predicted Future Power (15-min intervals)', color='red', linestyle='--', marker='o')
+
+# # Add labels, title, and grid
+# plt.title('Solar Power Forecast for Future Intervals', fontsize=16)
+# plt.xlabel('Date and Time', fontsize=12)
+# plt.ylabel('Power (MW)', fontsize=12)
+# plt.grid(True)
+
+# # Add a legend
+# plt.legend()
+
+# # Show the plot
+# plt.tight_layout()
+# plt.show()
+
